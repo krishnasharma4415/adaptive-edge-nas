@@ -356,101 +356,101 @@ DRY_VAL_BATCHES = 5      # val batches per epoch when dry-running
 # Script entry-point
 # ═════════════════════════════════════════════════════════════════════════════
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
 
-    arch_path = RESULTS_DIR / "best_arch.json"
-    if not arch_path.exists():
-        print("[nas.py] best_arch.json not found. Run hardware-aware.py first.")
-        raise SystemExit(1)
 
-    with open(arch_path) as f:
-        best = json.load(f)
-    arch = best["arch"]
+arch_path = RESULTS_DIR / "best_arch.json"
+if not arch_path.exists():
+    print("[nas.py] best_arch.json not found. Run hardware-aware.py first.")
+    raise SystemExit(1)
 
-    print(f"Fine-tuning best NAS architecture from scratch")
-    print(f"Arch ops: {[OP_NAMES[i] for i in arch]}")
+with open(arch_path) as f:
+    best = json.load(f)
+arch = best["arch"]
 
-    model    = StandaloneNASModel(arch).to(DEVICE)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Parameters: {n_params/1e6:.2f} M")
+print(f"Fine-tuning best NAS architecture from scratch")
+print(f"Arch ops: {[OP_NAMES[i] for i in arch]}")
 
-    train_loader, val_loader = get_dataloaders(
-        batch_size=FT_CFG["batch_size"], num_workers=FT_CFG["num_workers"], pin_memory=True)
+model    = StandaloneNASModel(arch).to(DEVICE)
+n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Parameters: {n_params/1e6:.2f} M")
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=FT_CFG["label_smooth"])
-    optimizer = optim.AdamW(model.parameters(),
-                             lr=FT_CFG["lr"], weight_decay=FT_CFG["weight_decay"])
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=FT_CFG["epochs"], eta_min=1e-6)
-    scaler    = GradScaler()
+train_loader, val_loader = get_dataloaders(
+    batch_size=FT_CFG["batch_size"], num_workers=FT_CFG["num_workers"], pin_memory=True)
 
-    best_acc1  = 0.
-    patience_c = 0
+criterion = nn.CrossEntropyLoss(label_smoothing=FT_CFG["label_smooth"])
+optimizer = optim.AdamW(model.parameters(),
+                         lr=FT_CFG["lr"], weight_decay=FT_CFG["weight_decay"])
+scheduler = optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=FT_CFG["epochs"], eta_min=1e-6)
+scaler    = GradScaler()
 
-    n_epochs = DRY_EPOCHS if DRY_RUN else FT_CFG["epochs"]
-    for epoch in range(1, n_epochs + 1):
-        model.train()
-        t0, run_loss, total = time.time(), 0., 0
+best_acc1  = 0.
+patience_c = 0
 
-        for batch_idx, (imgs, labels) in enumerate(train_loader):
-            if DRY_RUN and batch_idx >= DRY_BATCHES:
+n_epochs = DRY_EPOCHS if DRY_RUN else FT_CFG["epochs"]
+for epoch in range(1, n_epochs + 1):
+    model.train()
+    t0, run_loss, total = time.time(), 0., 0
+
+    for batch_idx, (imgs, labels) in enumerate(train_loader):
+        if DRY_RUN and batch_idx >= DRY_BATCHES:
+            break
+        imgs   = imgs.to(DEVICE, non_blocking=True)
+        labels = labels.to(DEVICE, non_blocking=True)
+
+        alpha = FT_CFG["mixup_alpha"]
+        lam   = np.random.beta(alpha, alpha) if alpha > 0 else 1.
+        idx   = torch.randperm(imgs.size(0), device=imgs.device)
+        imgs_m = lam * imgs + (1 - lam) * imgs[idx]
+        y_a, y_b = labels, labels[idx]
+
+        optimizer.zero_grad()
+        with autocast():
+            out  = model(imgs_m)
+            loss = lam * criterion(out, y_a) + (1 - lam) * criterion(out, y_b)
+
+        scaler.scale(loss).backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        scaler.step(optimizer)
+        scaler.update()
+        run_loss += loss.item() * imgs.size(0)
+        total    += imgs.size(0)
+
+    scheduler.step()
+
+    model.eval()
+    correct, n_val = 0, 0
+    with torch.no_grad():
+        for batch_idx, (imgs, labels) in enumerate(val_loader):
+            if DRY_RUN and batch_idx >= DRY_VAL_BATCHES:
                 break
-            imgs   = imgs.to(DEVICE, non_blocking=True)
-            labels = labels.to(DEVICE, non_blocking=True)
-
-            alpha = FT_CFG["mixup_alpha"]
-            lam   = np.random.beta(alpha, alpha) if alpha > 0 else 1.
-            idx   = torch.randperm(imgs.size(0), device=imgs.device)
-            imgs_m = lam * imgs + (1 - lam) * imgs[idx]
-            y_a, y_b = labels, labels[idx]
-
-            optimizer.zero_grad()
+            imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
             with autocast():
-                out  = model(imgs_m)
-                loss = lam * criterion(out, y_a) + (1 - lam) * criterion(out, y_b)
+                out = model(imgs)
+            correct += (out.argmax(1) == labels).sum().item()
+            n_val   += labels.size(0)
+    val_acc1 = correct / n_val
 
-            scaler.scale(loss).backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            scaler.step(optimizer)
-            scaler.update()
-            run_loss += loss.item() * imgs.size(0)
-            total    += imgs.size(0)
+    print(f"  Epoch [{epoch:03d}/{FT_CFG['epochs']}]  "
+          f"Loss={run_loss/total:.4f}  ValAcc={val_acc1*100:.2f}%  "
+          f"t={time.time()-t0:.1f}s")
 
-        scheduler.step()
+    if val_acc1 > best_acc1:
+        best_acc1  = val_acc1
+        patience_c = 0
+        ckpt_path  = MODELS_DIR / "nas_best_finetuned.pth"
+        torch.save({
+            "arch":        arch,
+            "epoch":       epoch,
+            "model_state": model.state_dict(),
+            "val_acc1":    val_acc1,
+        }, ckpt_path)
+    else:
+        patience_c += 1
+        if patience_c >= FT_CFG["patience"]:
+            print(f"  Early stopping at epoch {epoch}")
+            break
 
-        model.eval()
-        correct, n_val = 0, 0
-        with torch.no_grad():
-            for batch_idx, (imgs, labels) in enumerate(val_loader):
-                if DRY_RUN and batch_idx >= DRY_VAL_BATCHES:
-                    break
-                imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
-                with autocast():
-                    out = model(imgs)
-                correct += (out.argmax(1) == labels).sum().item()
-                n_val   += labels.size(0)
-        val_acc1 = correct / n_val
-
-        print(f"  Epoch [{epoch:03d}/{FT_CFG['epochs']}]  "
-              f"Loss={run_loss/total:.4f}  ValAcc={val_acc1*100:.2f}%  "
-              f"t={time.time()-t0:.1f}s")
-
-        if val_acc1 > best_acc1:
-            best_acc1  = val_acc1
-            patience_c = 0
-            ckpt_path  = MODELS_DIR / "nas_best_finetuned.pth"
-            torch.save({
-                "arch":        arch,
-                "epoch":       epoch,
-                "model_state": model.state_dict(),
-                "val_acc1":    val_acc1,
-            }, ckpt_path)
-        else:
-            patience_c += 1
-            if patience_c >= FT_CFG["patience"]:
-                print(f"  Early stopping at epoch {epoch}")
-                break
-
-    print(f"\nBest val accuracy : {best_acc1*100:.2f}%")
-    print(f"Saved → {MODELS_DIR / 'nas_best_finetuned.pth'}")
+print(f"\nBest val accuracy : {best_acc1*100:.2f}%")
+print(f"Saved → {MODELS_DIR / 'nas_best_finetuned.pth'}")
