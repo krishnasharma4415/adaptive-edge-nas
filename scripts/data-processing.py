@@ -251,66 +251,67 @@ def get_dataloaders(
 warnings.filterwarnings("ignore")
 
 
-# Augmentation preview
-train_ds_raw = TinyImageNetTrain(transform=T.Compose([T.ToTensor()]))
-aug_tf       = TRAIN_TRANSFORM
-n_samples    = 6
-indices      = random.sample(range(len(train_ds_raw)), n_samples)
-n_cols       = 4
+if __name__ == "__main__":
+    # Augmentation preview
+    train_ds_raw = TinyImageNetTrain(transform=T.Compose([T.ToTensor()]))
+    aug_tf       = TRAIN_TRANSFORM
+    n_samples    = 6
+    indices      = random.sample(range(len(train_ds_raw)), n_samples)
+    n_cols       = 4
 
-fig, axes = plt.subplots(n_samples, n_cols, figsize=(n_cols*3, n_samples*3),
-                          gridspec_kw={"hspace": 0.1, "wspace": 0.05})
-for col_idx, title in enumerate(["Original", "Aug ①", "Aug ②", "Aug ③"]):
-    axes[0, col_idx].set_title(title, fontsize=12, pad=8, fontweight="bold")
+    fig, axes = plt.subplots(n_samples, n_cols, figsize=(n_cols*3, n_samples*3),
+                              gridspec_kw={"hspace": 0.1, "wspace": 0.05})
+    for col_idx, title in enumerate(["Original", "Aug ①", "Aug ②", "Aug ③"]):
+        axes[0, col_idx].set_title(title, fontsize=12, pad=8, fontweight="bold")
 
-mean_t = torch.tensor(MEAN, dtype=torch.float32).view(3, 1, 1)
-std_t  = torch.tensor(STD,  dtype=torch.float32).view(3, 1, 1)
+    mean_t = torch.tensor(MEAN, dtype=torch.float32).view(3, 1, 1)
+    std_t  = torch.tensor(STD,  dtype=torch.float32).view(3, 1, 1)
 
-for row, idx in enumerate(indices):
-    path, _ = train_ds_raw.samples[idx]
-    pil_img = Image.open(path).convert("RGB")
-    raw_tensor = T.ToTensor()(pil_img)
-    axes[row, 0].imshow((raw_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
-    axes[row, 0].axis("off")
-    for col_idx in range(1, 4):
-        aug_tensor = aug_tf(pil_img)
-        img_denorm = (aug_tensor * std_t + mean_t).clamp(0, 1)
-        img_final = (img_denorm.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-        axes[row, col_idx].imshow(img_final)
-        axes[row, col_idx].axis("off")
+    for row, idx in enumerate(indices):
+        path, _ = train_ds_raw.samples[idx]
+        pil_img = Image.open(path).convert("RGB")
+        raw_tensor = T.ToTensor()(pil_img)
+        axes[row, 0].imshow((raw_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
+        axes[row, 0].axis("off")
+        for col_idx in range(1, 4):
+            aug_tensor = aug_tf(pil_img)
+            img_denorm = (aug_tensor * std_t + mean_t).clamp(0, 1)
+            img_final = (img_denorm.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+            axes[row, col_idx].imshow(img_final)
+            axes[row, col_idx].axis("off")
 
-fig.suptitle("Data Augmentation Preview — Training Pipeline",
-             fontsize=14, fontweight="bold", y=1.01)
-out = RESULTS_DIR / "augmentation_preview.png"
-plt.savefig(out, dpi=150, bbox_inches="tight")
-plt.close()
-print(f"✓  Augmentation preview → {out}")
+    fig.suptitle("Data Augmentation Preview — Training Pipeline",
+                 fontsize=14, fontweight="bold", y=1.01)
+    out = RESULTS_DIR / "augmentation_preview.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"✓  Augmentation preview → {out}")
 
-# DataLoader benchmark
-num_workers = max(1, (os.cpu_count() or 4) - 1)
-batch_size  = 128
-n_batches   = 20
-train_loader, _ = get_dataloaders(batch_size=batch_size)
-loader_iter     = iter(train_loader)
-_ = next(loader_iter)   # warm-up
+    # DataLoader benchmark
+    num_workers = max(1, (os.cpu_count() or 4) - 1)
+    batch_size  = 128
+    n_batches   = 20
+    train_loader, _ = get_dataloaders(batch_size=batch_size)
+    loader_iter     = iter(train_loader)
+    _ = next(loader_iter)   # warm-up
 
-t0 = time.perf_counter()
-n_imgs = 0
-for _ in range(min(n_batches, len(train_loader))):
-    imgs, _ = next(loader_iter)
-    n_imgs += imgs.shape[0]
-elapsed    = time.perf_counter() - t0
-throughput = n_imgs / elapsed
+    t0 = time.perf_counter()
+    n_imgs = 0
+    for _ in range(min(n_batches, len(train_loader))):
+        imgs, _ = next(loader_iter)
+        n_imgs += imgs.shape[0]
+    elapsed    = time.perf_counter() - t0
+    throughput = n_imgs / elapsed
 
-result = {
-    "batch_size":        batch_size,
-    "num_workers":       num_workers,
-    "n_batches":         n_batches,
-    "total_images":      n_imgs,
-    "elapsed_sec":       round(elapsed, 3),
-    "throughput_img_s":  round(throughput, 1),
-}
-out = RESULTS_DIR / "dataloader_benchmark.json"
-with open(out, "w") as f:
-    json.dump(result, f, indent=2)
-print(f"✓  Loader throughput : {throughput:,.0f} imgs/sec  → {out}")
+    result = {
+        "batch_size":        batch_size,
+        "num_workers":       num_workers,
+        "n_batches":         n_batches,
+        "total_images":      n_imgs,
+        "elapsed_sec":       round(elapsed, 3),
+        "throughput_img_s":  round(throughput, 1),
+    }
+    out = RESULTS_DIR / "dataloader_benchmark.json"
+    with open(out, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"✓  Loader throughput : {throughput:,.0f} imgs/sec  → {out}")

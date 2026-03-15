@@ -627,76 +627,77 @@ def evolutionary_search(supernet: SuperNet, lut: dict) -> list[dict]:
 # Script entry-point
 # ═════════════════════════════════════════════════════════════════════════════
 
-warnings.filterwarnings("ignore")
+if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
 
 
-print(f"Device : {DEVICE}")
-if DEVICE.type == "cuda":
-    print(f"GPU  : {torch.cuda.get_device_name(0)}"
-          f"  |  VRAM : {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f} GB")
+    print(f"Device : {DEVICE}")
+    if DEVICE.type == "cuda":
+        print(f"GPU  : {torch.cuda.get_device_name(0)}"
+              f"  |  VRAM : {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f} GB")
 
-lut_path = RESULTS_DIR / "latency_lut.json"
-if lut_path.exists():
-    with open(lut_path) as f:
-        lut = json.load(f)
-    print(f"[Phase 5.1] Loaded existing LUT from {lut_path.name}")
-else:
-    lut = build_latency_lut(n_runs=50)
+    lut_path = RESULTS_DIR / "latency_lut.json"
+    if lut_path.exists():
+        with open(lut_path) as f:
+            lut = json.load(f)
+        print(f"[Phase 5.1] Loaded existing LUT from {lut_path.name}")
+    else:
+        lut = build_latency_lut(n_runs=50)
 
-supernet = SuperNet().to(DEVICE)
-n_params = sum(p.numel() for p in supernet.parameters() if p.requires_grad)
-print(f"[Phase 5.3] Supernet params : {n_params/1e6:.2f} M")
+    supernet = SuperNet().to(DEVICE)
+    n_params = sum(p.numel() for p in supernet.parameters() if p.requires_grad)
+    print(f"[Phase 5.3] Supernet params : {n_params/1e6:.2f} M")
 
-supernet_ckpt = MODELS_DIR / "supernet_final.pth"
-if supernet_ckpt.exists():
-    ckpt = torch.load(supernet_ckpt, map_location=DEVICE)
-    supernet.load_state_dict(ckpt["state_dict"])
-    print(f"[Phase 5.3] Loaded supernet from {supernet_ckpt.name}")
-else:
-    supernet_train(supernet, lut)
+    supernet_ckpt = MODELS_DIR / "supernet_final.pth"
+    if supernet_ckpt.exists():
+        ckpt = torch.load(supernet_ckpt, map_location=DEVICE)
+        supernet.load_state_dict(ckpt["state_dict"])
+        print(f"[Phase 5.3] Loaded supernet from {supernet_ckpt.name}")
+    else:
+        supernet_train(supernet, lut)
 
-results = evolutionary_search(supernet, lut)
+    results = evolutionary_search(supernet, lut)
 
-budget = HW_CFG["latency_budget"]
-valid  = [r for r in results if r["lat_ms"] <= budget] or results
-best   = max(valid, key=lambda r: r["acc"])
+    budget = HW_CFG["latency_budget"]
+    valid  = [r for r in results if r["lat_ms"] <= budget] or results
+    best   = max(valid, key=lambda r: r["acc"])
 
-best_path = RESULTS_DIR / "best_arch.json"
-with open(best_path, "w") as f:
-    json.dump(best, f, indent=2)
-print(f"✓  Best arch → {best_path}")
-print(f"   Accuracy : {best['acc']*100:.2f}%  |  Latency : {best['lat_ms']:.2f} ms")
-print(f"   Ops      : {[OP_NAMES[i] for i in best['arch']]}")
+    best_path = RESULTS_DIR / "best_arch.json"
+    with open(best_path, "w") as f:
+        json.dump(best, f, indent=2)
+    print(f"✓  Best arch → {best_path}")
+    print(f"   Accuracy : {best['acc']*100:.2f}%  |  Latency : {best['lat_ms']:.2f} ms")
+    print(f"   Ops      : {[OP_NAMES[i] for i in best['arch']]}")
 
-# Plot Pareto Front
-accs = [r["acc"] * 100 for r in results]
-lats = [r["lat_ms"]    for r in results]
+    # Plot Pareto Front
+    accs = [r["acc"] * 100 for r in results]
+    lats = [r["lat_ms"]    for r in results]
 
-pareto_mask = []
-for i, (a1, l1) in enumerate(zip(accs, lats)):
-    dominated = any(
-        (a2 >= a1 and l2 <= l1 and (a2 > a1 or l2 < l1))
-        for j, (a2, l2) in enumerate(zip(accs, lats)) if j != i
-    )
-    pareto_mask.append(not dominated)
+    pareto_mask = []
+    for i, (a1, l1) in enumerate(zip(accs, lats)):
+        dominated = any(
+            (a2 >= a1 and l2 <= l1 and (a2 > a1 or l2 < l1))
+            for j, (a2, l2) in enumerate(zip(accs, lats)) if j != i
+        )
+        pareto_mask.append(not dominated)
 
-fig, ax = plt.subplots(figsize=(10, 7))
-ax.scatter([l for l, p in zip(lats, pareto_mask) if not p],
-           [a for a, p in zip(accs, pareto_mask) if not p],
-           alpha=0.4, s=20, c="#95A5A6", label="Searched architectures")
-px = [l for l, p in zip(lats, pareto_mask) if p]
-py = [a for a, p in zip(accs, pareto_mask) if p]
-order = sorted(range(len(px)), key=lambda i: px[i])
-ax.plot([px[o] for o in order], [py[o] for o in order],
-        "o-", lw=2, color="#E74C3C", ms=8, label="Pareto front", zorder=5)
-ax.set_xlabel("Predicted Latency (ms)", fontsize=12)
-ax.set_ylabel("Top-1 Accuracy (%)", fontsize=12)
-ax.set_title("Hardware-Aware NAS — Search Results: Accuracy vs Latency",
-             fontsize=13, fontweight="bold")
-ax.legend(fontsize=11)
-ax.grid(alpha=0.3)
-plt.tight_layout()
-out = RESULTS_DIR / "pareto_front.png"
-plt.savefig(out, dpi=150, bbox_inches="tight")
-plt.close()
-print(f"✓  Pareto front → {out}")
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.scatter([l for l, p in zip(lats, pareto_mask) if not p],
+               [a for a, p in zip(accs, pareto_mask) if not p],
+               alpha=0.4, s=20, c="#95A5A6", label="Searched architectures")
+    px = [l for l, p in zip(lats, pareto_mask) if p]
+    py = [a for a, p in zip(accs, pareto_mask) if p]
+    order = sorted(range(len(px)), key=lambda i: px[i])
+    ax.plot([px[o] for o in order], [py[o] for o in order],
+            "o-", lw=2, color="#E74C3C", ms=8, label="Pareto front", zorder=5)
+    ax.set_xlabel("Predicted Latency (ms)", fontsize=12)
+    ax.set_ylabel("Top-1 Accuracy (%)", fontsize=12)
+    ax.set_title("Hardware-Aware NAS — Search Results: Accuracy vs Latency",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    out = RESULTS_DIR / "pareto_front.png"
+    plt.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"✓  Pareto front → {out}")

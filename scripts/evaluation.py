@@ -269,187 +269,188 @@ def export_and_benchmark_onnx(model: nn.Module, name: str, n_runs: int = 100) ->
 # Script entry-point
 # ═════════════════════════════════════════════════════════════════════════════
 
-warnings.filterwarnings("ignore")
+if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
 
 
-print(f"Device : {DEVICE}")
-val_loader     = get_val_loader(batch_size=256, num_workers=4, pin_memory=True)
-all_model_data = []
+    print(f"Device : {DEVICE}")
+    val_loader     = get_val_loader(batch_size=256, num_workers=4, pin_memory=True)
+    all_model_data = []
 
-for name in BASELINE_NAMES:
-    ckpt_path = MODELS_DIR / f"{name}_best.pth"
-    if not ckpt_path.exists():
-        print(f"  ⚠  Checkpoint not found for {name} — skipping")
-        continue
+    for name in BASELINE_NAMES:
+        ckpt_path = MODELS_DIR / f"{name}_best.pth"
+        if not ckpt_path.exists():
+            print(f"  ⚠  Checkpoint not found for {name} — skipping")
+            continue
 
-    print(f"\n{'='*55}\n  Evaluating : {name.upper()}\n{'='*55}")
+        print(f"\n{'='*55}\n  Evaluating : {name.upper()}\n{'='*55}")
 
-    if name == "mobilenetv2":
-        model = tvm.mobilenet_v2(weights=None, num_classes=200)
-        model.features[0][0].stride = (1, 1)
-    elif name == "shufflenetv2":
-        model = tvm.shufflenet_v2_x1_0(weights=None, num_classes=200)
-        model.conv1[0].stride = (1, 1)
-    elif name == "efficientnet_b0":
-        model = tvm.efficientnet_b0(weights=None, num_classes=200)
-        model.features[0][0].stride = (1, 1)
+        if name == "mobilenetv2":
+            model = tvm.mobilenet_v2(weights=None, num_classes=200)
+            model.features[0][0].stride = (1, 1)
+        elif name == "shufflenetv2":
+            model = tvm.shufflenet_v2_x1_0(weights=None, num_classes=200)
+            model.conv1[0].stride = (1, 1)
+        elif name == "efficientnet_b0":
+            model = tvm.efficientnet_b0(weights=None, num_classes=200)
+            model.features[0][0].stride = (1, 1)
 
-    ckpt = torch.load(ckpt_path, map_location=DEVICE)
-    model.load_state_dict(ckpt["model_state"])
-    model = model.to(DEVICE)
+        ckpt = torch.load(ckpt_path, map_location=DEVICE)
+        model.load_state_dict(ckpt["model_state"])
+        model = model.to(DEVICE)
 
-    val_metrics = evaluate(model, val_loader)
-    latency_ms  = measure_latency_ms(model)
-    params_m    = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    size_mb     = ckpt_path.stat().st_size / 1024**2
+        val_metrics = evaluate(model, val_loader)
+        latency_ms  = measure_latency_ms(model)
+        params_m    = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
+        size_mb     = ckpt_path.stat().st_size / 1024**2
 
-    try:
-        import importlib
-        thop = importlib.import_module("thop")
-        # Profile on a copy — thop registers total_ops/total_params buffers
-        # on the model in-place; doing this on the original would corrupt
-        # its state_dict and break quantize_model / load_state_dict later.
-        _model_copy = copy.deepcopy(model)
-        flops_m, _ = thop.profile(_model_copy, inputs=(torch.randn(1, 3, 64, 64, device=DEVICE),), verbose=False)
-        flops_m = float(flops_m) / 1e6
-        del _model_copy
-    except ImportError:
-        flops_m = -1.0
+        try:
+            import importlib
+            thop = importlib.import_module("thop")
+            # Profile on a copy — thop registers total_ops/total_params buffers
+            # on the model in-place; doing this on the original would corrupt
+            # its state_dict and break quantize_model / load_state_dict later.
+            _model_copy = copy.deepcopy(model)
+            flops_m, _ = thop.profile(_model_copy, inputs=(torch.randn(1, 3, 64, 64, device=DEVICE),), verbose=False)
+            flops_m = float(flops_m) / 1e6
+            del _model_copy
+        except ImportError:
+            flops_m = -1.0
 
-    print(f"  Accuracy (Top-1/5) : {val_metrics['acc1']:.2f}% / {val_metrics['acc5']:.2f}%")
-    print(f"  Latency : {latency_ms:.2f} ms  |  Params : {params_m:.2f} M  |  Size : {size_mb:.1f} MB")
+        print(f"  Accuracy (Top-1/5) : {val_metrics['acc1']:.2f}% / {val_metrics['acc5']:.2f}%")
+        print(f"  Latency : {latency_ms:.2f} ms  |  Params : {params_m:.2f} M  |  Size : {size_mb:.1f} MB")
 
-    quantize_model(model, name)
-    prune_model(model, name, amount=0.30)
-    onnx_lat = export_and_benchmark_onnx(model, name)
+        quantize_model(model, name)
+        prune_model(model, name, amount=0.30)
+        onnx_lat = export_and_benchmark_onnx(model, name)
 
-    all_model_data.append({
-        "name":          name,
-        "acc1":          val_metrics["acc1"],
-        "acc5":          val_metrics["acc5"],
-        "params_M":      round(params_m, 3),
-        "flops_M":       round(flops_m, 1),
-        "lat_ms":        round(latency_ms, 2),
-        "onnx_lat_ms":   round(onnx_lat, 2),
-        "model_size_MB": round(size_mb, 1),
-    })
+        all_model_data.append({
+            "name":          name,
+            "acc1":          val_metrics["acc1"],
+            "acc5":          val_metrics["acc5"],
+            "params_M":      round(params_m, 3),
+            "flops_M":       round(flops_m, 1),
+            "lat_ms":        round(latency_ms, 2),
+            "onnx_lat_ms":   round(onnx_lat, 2),
+            "model_size_MB": round(size_mb, 1),
+        })
 
-nas_path = RESULTS_DIR / "best_arch.json"
-if nas_path.exists():
-    with open(nas_path) as f:
-        nas_info = json.load(f)
-    all_model_data.append({
-        "name":          "NAS-Found",
-        "acc1":          round(nas_info.get("acc", 0) * 100, 2),
-        "acc5":          0.0,
-        "params_M":      0.0,
-        "flops_M":       0.0,
-        "lat_ms":        round(nas_info.get("lat_ms", 0), 2),
-        "model_size_MB": 0.0,
-    })
+    nas_path = RESULTS_DIR / "best_arch.json"
+    if nas_path.exists():
+        with open(nas_path) as f:
+            nas_info = json.load(f)
+        all_model_data.append({
+            "name":          "NAS-Found",
+            "acc1":          round(nas_info.get("acc", 0) * 100, 2),
+            "acc5":          0.0,
+            "params_M":      0.0,
+            "flops_M":       0.0,
+            "lat_ms":        round(nas_info.get("lat_ms", 0), 2),
+            "model_size_MB": 0.0,
+        })
 
-print("\n" + "═"*90)
-print(f"  {'Model':<22} {'Acc@1':>7} {'Acc@5':>7} {'Params':>8} {'FLOPs':>9} "
-      f"{'Lat(ms)':>9} {'Size(MB)':>9}")
-print("═"*90)
-for m in all_model_data:
-    print(f"  {m['name']:<22} {m['acc1']:>7.2f} {m['acc5']:>7.2f} "
-          f"{m['params_M']:>8.2f} {m['flops_M']:>9.1f} "
-          f"{m['lat_ms']:>9.2f} {m['model_size_MB']:>9.1f}")
-print("═"*90)
+    print("\n" + "═"*90)
+    print(f"  {'Model':<22} {'Acc@1':>7} {'Acc@5':>7} {'Params':>8} {'FLOPs':>9} "
+          f"{'Lat(ms)':>9} {'Size(MB)':>9}")
+    print("═"*90)
+    for m in all_model_data:
+        print(f"  {m['name']:<22} {m['acc1']:>7.2f} {m['acc5']:>7.2f} "
+              f"{m['params_M']:>8.2f} {m['flops_M']:>9.1f} "
+              f"{m['lat_ms']:>9.2f} {m['model_size_MB']:>9.1f}")
+    print("═"*90)
 
-out_json = RESULTS_DIR / "final_comparison.json"
-with open(out_json, "w") as f:
-    json.dump(all_model_data, f, indent=2)
-print(f"\n✓  Final comparison data → {out_json}")
+    out_json = RESULTS_DIR / "final_comparison.json"
+    with open(out_json, "w") as f:
+        json.dump(all_model_data, f, indent=2)
+    print(f"\n✓  Final comparison data → {out_json}")
 
-# ── 1. Final Comparison Bar Chart ──────────────────────────────────────
-if all_model_data:
-    names  = [m.get("name", "?") for m in all_model_data]
-    acc1   = [m.get("acc1", 0) for m in all_model_data]
-    lats   = [m.get("lat_ms", 0) for m in all_model_data]
-    params = [m.get("params_M", 0) for m in all_model_data]
-    flops  = [m.get("flops_M", 0) for m in all_model_data]
+    # ── 1. Final Comparison Bar Chart ──────────────────────────────────────
+    if all_model_data:
+        names  = [m.get("name", "?") for m in all_model_data]
+        acc1   = [m.get("acc1", 0) for m in all_model_data]
+        lats   = [m.get("lat_ms", 0) for m in all_model_data]
+        params = [m.get("params_M", 0) for m in all_model_data]
+        flops  = [m.get("flops_M", 0) for m in all_model_data]
 
-    palette = plt.cm.Set2(np.linspace(0, 1, len(names)))
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    axes = axes.ravel()
+        palette = plt.cm.Set2(np.linspace(0, 1, len(names)))
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        axes = axes.ravel()
 
-    for ax, (vals, ylabel, title) in zip(axes, [
-        (acc1,   "Top-1 Accuracy (%)",    "Accuracy"),
-        (lats,   "Inference Latency (ms)", "Latency (ms)"),
-        (params, "# Parameters (M)",       "Params"),
-        (flops,  "FLOPs (M)",              "FLOPs (M)"),
-    ]):
-        bars = ax.bar(names, vals, color=palette, edgecolor="white", linewidth=1.5)
-        ax.set_ylabel(ylabel, fontsize=12)
-        ax.set_title(title, fontsize=13, fontweight="bold")
-        ax.grid(axis="y", alpha=0.3)
-        for bar, v in zip(bars, vals):
-            ax.text(bar.get_x() + bar.get_width()/2,
-                    bar.get_height() + max(vals) * 0.01,
-                    f"{v:.1f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
-        ax.set_xticklabels(names, rotation=15, ha="right", fontsize=10)
+        for ax, (vals, ylabel, title) in zip(axes, [
+            (acc1,   "Top-1 Accuracy (%)",    "Accuracy"),
+            (lats,   "Inference Latency (ms)", "Latency (ms)"),
+            (params, "# Parameters (M)",       "Params"),
+            (flops,  "FLOPs (M)",              "FLOPs (M)"),
+        ]):
+            bars = ax.bar(names, vals, color=palette, edgecolor="white", linewidth=1.5)
+            ax.set_ylabel(ylabel, fontsize=12)
+            ax.set_title(title, fontsize=13, fontweight="bold")
+            ax.grid(axis="y", alpha=0.3)
+            for bar, v in zip(bars, vals):
+                ax.text(bar.get_x() + bar.get_width()/2,
+                        bar.get_height() + max(vals) * 0.01,
+                        f"{v:.1f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+            ax.set_xticklabels(names, rotation=15, ha="right", fontsize=10)
 
-    plt.suptitle("Final Model Comparison — Hardware-Aware NAS Project",
-                 fontsize=15, fontweight="bold", y=1.01)
-    plt.tight_layout()
-    out1 = RESULTS_DIR / "final_comparison.png"
-    plt.savefig(out1, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  ✓  Final comparison → {out1}")
+        plt.suptitle("Final Model Comparison — Hardware-Aware NAS Project",
+                     fontsize=15, fontweight="bold", y=1.01)
+        plt.tight_layout()
+        out1 = RESULTS_DIR / "final_comparison.png"
+        plt.savefig(out1, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  ✓  Final comparison → {out1}")
 
-# ── 2. Accuracy vs Latency Bubble Chart ───────────────────────────────
-if all_model_data:
-    fig, ax = plt.subplots(figsize=(10, 7))
-    palette = plt.cm.tab10(np.linspace(0, 1, len(all_model_data)))
+    # ── 2. Accuracy vs Latency Bubble Chart ───────────────────────────────
+    if all_model_data:
+        fig, ax = plt.subplots(figsize=(10, 7))
+        palette = plt.cm.tab10(np.linspace(0, 1, len(all_model_data)))
 
-    for m, color in zip(all_model_data, palette):
-        name   = m.get("name", "?")
-        acc    = m.get("acc1", 0)
-        lat    = m.get("lat_ms", 0)
-        params_ = m.get("params_M", 1.0)
-        ax.scatter(lat, acc, s=params_ * 80, color=color,
-                   edgecolors="white", linewidths=1.5, zorder=3, label=name, alpha=0.9)
-        ax.annotate(name, (lat, acc), textcoords="offset points",
-                    xytext=(8, 4), fontsize=9, color=color)
+        for m, color in zip(all_model_data, palette):
+            name   = m.get("name", "?")
+            acc    = m.get("acc1", 0)
+            lat    = m.get("lat_ms", 0)
+            params_ = m.get("params_M", 1.0)
+            ax.scatter(lat, acc, s=params_ * 80, color=color,
+                       edgecolors="white", linewidths=1.5, zorder=3, label=name, alpha=0.9)
+            ax.annotate(name, (lat, acc), textcoords="offset points",
+                        xytext=(8, 4), fontsize=9, color=color)
 
-    ax.set_xlabel("Inference Latency (ms, batch=1)", fontsize=12)
-    ax.set_ylabel("Top-1 Accuracy (%)", fontsize=12)
-    ax.set_title("Accuracy vs Latency Trade-off\n(Bubble size ∝ # Parameters)",
-                 fontsize=13, fontweight="bold")
-    ax.legend(fontsize=10, loc="lower right")
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    out2 = RESULTS_DIR / "accuracy_vs_latency.png"
-    plt.savefig(out2, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  ✓  Accuracy vs Latency → {out2}")
+        ax.set_xlabel("Inference Latency (ms, batch=1)", fontsize=12)
+        ax.set_ylabel("Top-1 Accuracy (%)", fontsize=12)
+        ax.set_title("Accuracy vs Latency Trade-off\n(Bubble size ∝ # Parameters)",
+                     fontsize=13, fontweight="bold")
+        ax.legend(fontsize=10, loc="lower right")
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        out2 = RESULTS_DIR / "accuracy_vs_latency.png"
+        plt.savefig(out2, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  ✓  Accuracy vs Latency → {out2}")
 
-# ── 3. FLOPs vs Latency Scatter ────────────────────────────────────────
-f_vals = [m.get("flops_M", 0) for m in all_model_data]
-l_vals = [m.get("lat_ms", 0)  for m in all_model_data]
-names_ = [m.get("name", "?")   for m in all_model_data]
+    # ── 3. FLOPs vs Latency Scatter ────────────────────────────────────────
+    f_vals = [m.get("flops_M", 0) for m in all_model_data]
+    l_vals = [m.get("lat_ms", 0)  for m in all_model_data]
+    names_ = [m.get("name", "?")   for m in all_model_data]
 
-if f_vals and not all(v <= 0 for v in f_vals):
-    fig, ax = plt.subplots(figsize=(9, 6))
-    palette = plt.cm.Set1(np.linspace(0, 1, len(names_)))
+    if f_vals and not all(v <= 0 for v in f_vals):
+        fig, ax = plt.subplots(figsize=(9, 6))
+        palette = plt.cm.Set1(np.linspace(0, 1, len(names_)))
 
-    for lat, flop, name, color in zip(l_vals, f_vals, names_, palette):
-        if flop > 0:
-            ax.scatter(flop, lat, s=120, color=color, label=name,
-                       edgecolors="white", linewidths=1.5, zorder=3)
-            ax.annotate(name, (flop, lat), textcoords="offset points",
-                        xytext=(6, 3), fontsize=9, color=color)
+        for lat, flop, name, color in zip(l_vals, f_vals, names_, palette):
+            if flop > 0:
+                ax.scatter(flop, lat, s=120, color=color, label=name,
+                           edgecolors="white", linewidths=1.5, zorder=3)
+                ax.annotate(name, (flop, lat), textcoords="offset points",
+                            xytext=(6, 3), fontsize=9, color=color)
 
-    ax.set_xlabel("FLOPs (M)", fontsize=12)
-    ax.set_ylabel("Latency (ms)", fontsize=12)
-    ax.set_title("FLOPs vs Real Latency\n(FLOPs ≠ Latency — hardware matters!)",
-                 fontsize=13, fontweight="bold")
-    ax.legend(fontsize=9)
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    out3 = RESULTS_DIR / "flops_vs_latency.png"
-    plt.savefig(out3, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  ✓  FLOPs vs Latency → {out3}")
+        ax.set_xlabel("FLOPs (M)", fontsize=12)
+        ax.set_ylabel("Latency (ms)", fontsize=12)
+        ax.set_title("FLOPs vs Real Latency\n(FLOPs ≠ Latency — hardware matters!)",
+                     fontsize=13, fontweight="bold")
+        ax.legend(fontsize=9)
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        out3 = RESULTS_DIR / "flops_vs_latency.png"
+        plt.savefig(out3, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  ✓  FLOPs vs Latency → {out3}")
